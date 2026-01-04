@@ -1,11 +1,13 @@
 
-import { User, Budget, Expense, SavingsGoal } from '../types';
+import { User, Budget, Expense, SavingsGoal, SavingsQuest, SpendingPersona } from '../types';
 
 const STORAGE_KEYS = {
   USER: 'ft_user',
   BUDGET: 'ft_budget',
   EXPENSES: 'ft_expenses',
-  GOAL: 'ft_goal'
+  GOAL: 'ft_goal',
+  QUEST: 'ft_active_quest',
+  PERSONA: 'ft_persona'
 };
 
 export const db = {
@@ -15,83 +17,46 @@ export const db = {
     localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(user));
     return user;
   },
-
   getUser: (): User | null => {
     const stored = localStorage.getItem(STORAGE_KEYS.USER);
     return stored ? JSON.parse(stored) : null;
   },
-
   logout: () => {
     localStorage.removeItem(STORAGE_KEYS.USER);
   },
 
-  // Budget & Income
-  saveBudget: (budget: Budget) => {
-    localStorage.setItem(STORAGE_KEYS.BUDGET, JSON.stringify(budget));
-  },
-
+  // Budget
+  saveBudget: (budget: Budget) => localStorage.setItem(STORAGE_KEYS.BUDGET, JSON.stringify(budget)),
   getBudget: (): Budget => {
     const nowMonth = new Date().toISOString().slice(0, 7);
     const stored = localStorage.getItem(STORAGE_KEYS.BUDGET);
-    
-    if (!stored) {
-      const defaultBudget: Budget = { 
-        amount: 0, 
-        income: 0, 
-        month: nowMonth,
-        rolloverEnabled: false
-      };
-      return defaultBudget;
-    }
-
+    if (!stored) return { amount: 0, income: 0, month: nowMonth, rolloverEnabled: false };
     const budget: Budget = JSON.parse(stored);
-
-    // Month Transition Logic
     if (budget.month !== nowMonth) {
-      // Archive happens naturally as Dashboard filters by budget.month
-      // We update the budget context to the new month but keep user settings (income, limit, rollover toggle)
-      const transitionedBudget = {
-        ...budget,
-        month: nowMonth
-      };
-      localStorage.setItem(STORAGE_KEYS.BUDGET, JSON.stringify(transitionedBudget));
-      return transitionedBudget;
+      const transitioned = { ...budget, month: nowMonth };
+      localStorage.setItem(STORAGE_KEYS.BUDGET, JSON.stringify(transitioned));
+      return transitioned;
     }
-
     return budget;
   },
 
-  // Rollover Calculation
+  // Rollover
   getRolloverAmount: (currentMonth: string): number => {
     const expenses = db.getExpenses();
     const stored = localStorage.getItem(STORAGE_KEYS.BUDGET);
     if (!stored) return 0;
-    
     const budget: Budget = JSON.parse(stored);
     if (!budget.rolloverEnabled) return 0;
-
-    // Determine previous month string (YYYY-MM)
     const [year, month] = currentMonth.split('-').map(Number);
-    // JS Date month is 0-indexed. 
-    // If currentMonth is 2024-06 (June), month is 6. 
-    // Previous month (May) is index 4.
-    // Date(2024, 6 - 2, 1) -> Date(2024, 4, 1) -> May 1st.
     const prevDate = new Date(year, month - 2, 1);
     const prevMonthStr = prevDate.toISOString().slice(0, 7);
-
-    const prevMonthExpenses = expenses.filter(e => e.date.startsWith(prevMonthStr));
-    const prevSpent = prevMonthExpenses.reduce((sum, e) => sum + e.amount, 0);
-    
-    // As per user requirement: assume same budget limit applied last month if not found.
+    const prevSpent = expenses.filter(e => e.date.startsWith(prevMonthStr)).reduce((sum, e) => sum + e.amount, 0);
     const surplus = budget.amount - prevSpent;
     return surplus > 0 ? surplus : 0;
   },
 
   // Savings Goal
-  saveGoal: (goal: SavingsGoal) => {
-    localStorage.setItem(STORAGE_KEYS.GOAL, JSON.stringify(goal));
-  },
-
+  saveGoal: (goal: SavingsGoal) => localStorage.setItem(STORAGE_KEYS.GOAL, JSON.stringify(goal)),
   getGoal: (): SavingsGoal | null => {
     const stored = localStorage.getItem(STORAGE_KEYS.GOAL);
     return stored ? JSON.parse(stored) : null;
@@ -105,14 +70,27 @@ export const db = {
     localStorage.setItem(STORAGE_KEYS.EXPENSES, JSON.stringify(expenses));
     return newExpense;
   },
-
   getExpenses: (): Expense[] => {
     const stored = localStorage.getItem(STORAGE_KEYS.EXPENSES);
     return stored ? JSON.parse(stored) : [];
   },
-
   deleteExpense: (id: string) => {
     const expenses = db.getExpenses().filter(e => e.id !== id);
     localStorage.setItem(STORAGE_KEYS.EXPENSES, JSON.stringify(expenses));
+  },
+
+  // Quests & Persona
+  saveActiveQuest: (quest: SavingsQuest | null) => {
+    if (quest) localStorage.setItem(STORAGE_KEYS.QUEST, JSON.stringify(quest));
+    else localStorage.removeItem(STORAGE_KEYS.QUEST);
+  },
+  getActiveQuest: (): SavingsQuest | null => {
+    const stored = localStorage.getItem(STORAGE_KEYS.QUEST);
+    return stored ? JSON.parse(stored) : null;
+  },
+  savePersona: (persona: SpendingPersona) => localStorage.setItem(STORAGE_KEYS.PERSONA, JSON.stringify(persona)),
+  getPersona: (): SpendingPersona | null => {
+    const stored = localStorage.getItem(STORAGE_KEYS.PERSONA);
+    return stored ? JSON.parse(stored) : null;
   }
 };

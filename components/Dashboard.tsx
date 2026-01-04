@@ -1,8 +1,8 @@
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { db } from '../services/db';
-import { getFinancialInsight, getMarketSavings, getGoalStrategy, analyzeSubscriptions, getSpendingForecast, calculateWealthScore } from '../services/gemini';
-import { User, Budget, Expense, SavingsTip, SavingsGoal, WealthScore } from '../types';
+import { getFinancialInsight, getGoalStrategy, analyzeSubscriptions, getSpendingForecast, calculateWealthScore, detectAnomalies, getFreedomHorizon, getValueAudit, generateSavingsQuest, getSpendingPersona } from '../services/gemini';
+import { User, Budget, Expense, SavingsGoal, WealthScore, SpendingAlert, FreedomProjection, SavingsQuest, SpendingPersona } from '../types';
 import ExpenseForm from './ExpenseForm';
 import BudgetForm from './BudgetForm';
 import IncomeForm from './IncomeForm';
@@ -11,9 +11,11 @@ import GoalProgress from './GoalProgress';
 import SubscriptionManager from './SubscriptionManager';
 import RolloverSettings from './RolloverSettings';
 import ChatAssistant from './ChatAssistant';
+import CategoryBudgetManager from './CategoryBudgetManager';
+import FreedomHorizon from './FreedomHorizon';
+import SavingsQuests from './SavingsQuests';
+import SpendingPersonaCard from './SpendingPersonaCard';
 import { 
-  BarChart, 
-  Bar, 
   XAxis, 
   Tooltip, 
   ResponsiveContainer, 
@@ -23,7 +25,10 @@ import {
   LineChart,
   Line,
   YAxis,
-  CartesianGrid
+  CartesianGrid,
+  ScatterChart,
+  Scatter,
+  ZAxis
 } from 'recharts';
 
 interface DashboardProps { user: User; }
@@ -36,321 +41,156 @@ const Dashboard: React.FC<DashboardProps> = ({ user }) => {
   const [insight, setInsight] = useState<string | null>(null);
   const [forecast, setForecast] = useState<string | null>(null);
   const [goalStrategy, setGoalStrategy] = useState<string | null>(null);
-  const [savingsTip, setSavingsTip] = useState<SavingsTip | null>(null);
   const [subAudit, setSubAudit] = useState<string | null>(null);
   const [wealthScore, setWealthScore] = useState<WealthScore | null>(null);
+  const [alerts, setAlerts] = useState<SpendingAlert[]>([]);
+  const [freedomProjection, setFreedomProjection] = useState<FreedomProjection | null>(null);
+  const [valueAudit, setValueAudit] = useState<string | null>(null);
+  const [quest, setQuest] = useState<SavingsQuest | null>(db.getActiveQuest());
+  const [persona, setPersona] = useState<SpendingPersona | null>(db.getPersona());
   const [isLoading, setIsLoading] = useState(false);
+  const [searchTerm, setSearchTerm] = useState('');
 
-  const currentMonthExpenses = useMemo(() => {
-    return expenses.filter(e => e.date.startsWith(budget.month));
-  }, [expenses, budget.month]);
-
+  const currentMonthExpenses = useMemo(() => expenses.filter(e => e.date.startsWith(budget.month)), [expenses, budget.month]);
+  const filteredExpenses = useMemo(() => currentMonthExpenses.filter(e => e.description.toLowerCase().includes(searchTerm.toLowerCase()) || e.category.toLowerCase().includes(searchTerm.toLowerCase())), [currentMonthExpenses, searchTerm]);
   const totalSpent = useMemo(() => currentMonthExpenses.reduce((sum, exp) => sum + exp.amount, 0), [currentMonthExpenses]);
   const rolloverAmount = useMemo(() => db.getRolloverAmount(budget.month), [budget.month, budget.rolloverEnabled, expenses]);
-  
   const totalAvailableBudget = budget.amount + (budget.rolloverEnabled ? rolloverAmount : 0);
   const currentNetSavings = budget.income - totalSpent;
 
-  // Historical Trends Calculation (Last 4 months)
   const historicalData = useMemo(() => {
     const data = [];
     for (let i = 3; i >= 0; i--) {
-      const d = new Date();
-      d.setMonth(d.getMonth() - i);
+      const d = new Date(); d.setMonth(d.getMonth() - i);
       const mStr = d.toISOString().slice(0, 7);
       const mLabel = d.toLocaleString('default', { month: 'short' });
-      const mExpenses = expenses.filter(e => e.date.startsWith(mStr));
-      const mSpent = mExpenses.reduce((sum, e) => sum + e.amount, 0);
+      const mSpent = expenses.filter(e => e.date.startsWith(mStr)).reduce((sum, e) => sum + e.amount, 0);
       data.push({ name: mLabel, spent: mSpent, budget: budget.amount });
     }
     return data;
   }, [expenses, budget.amount]);
 
-  const categoryData = useMemo(() => {
-    const cats: Record<string, number> = {};
-    currentMonthExpenses.forEach(e => {
-      cats[e.category] = (cats[e.category] || 0) + e.amount;
-    });
-    return Object.entries(cats).map(([name, value]) => ({ name, value }));
+  const scatterData = useMemo(() => {
+    const sentiments: Record<string, number> = { 'Essential': 3, 'Joyful': 4, 'Neutral': 2, 'Regret': 1 };
+    return currentMonthExpenses.map(e => ({ x: e.amount, y: sentiments[e.sentiment || 'Neutral'], name: e.description, sentiment: e.sentiment || 'Neutral' }));
   }, [currentMonthExpenses]);
 
   const refreshAI = useCallback(async () => {
     if (budget.income === 0 && budget.amount === 0) return;
     setIsLoading(true);
     try {
-      const promises: Promise<any>[] = [
-        getFinancialInsight(budget, currentMonthExpenses, budget.rolloverEnabled ? rolloverAmount : 0),
-        getMarketSavings(currentMonthExpenses),
+      const results = await Promise.all([
+        getFinancialInsight(budget, currentMonthExpenses),
         analyzeSubscriptions(currentMonthExpenses),
-        getSpendingForecast(budget, currentMonthExpenses, budget.rolloverEnabled ? rolloverAmount : 0),
-        calculateWealthScore(budget, currentMonthExpenses, goal)
-      ];
+        getSpendingForecast(budget, currentMonthExpenses),
+        calculateWealthScore(budget, currentMonthExpenses, goal),
+        detectAnomalies(budget, currentMonthExpenses),
+        getFreedomHorizon(budget, currentMonthExpenses),
+        getValueAudit(currentMonthExpenses),
+        generateSavingsQuest(currentMonthExpenses),
+        getSpendingPersona(currentMonthExpenses)
+      ]);
       
-      if (goal) {
-        promises.push(getGoalStrategy(budget, currentMonthExpenses, goal, budget.rolloverEnabled ? rolloverAmount : 0));
-      }
-
-      const results = await Promise.all(promises);
       setInsight(results[0]);
-      setSavingsTip(results[1]);
-      setSubAudit(results[2]);
-      setForecast(results[3]);
-      setWealthScore(results[4]);
-      if (goal) setGoalStrategy(results[5]);
+      setSubAudit(results[1]);
+      setForecast(results[2]);
+      setWealthScore(results[3]);
+      setAlerts(results[4]);
+      setFreedomProjection(results[5]);
+      setValueAudit(results[6]);
+      if (!quest || quest.status === 'Available') {
+        setQuest(results[7]);
+        db.saveActiveQuest(results[7]);
+      }
+      if (results[8]) {
+        setPersona(results[8]);
+        db.savePersona(results[8]);
+      }
+      if (goal) {
+        const strat = await getGoalStrategy(budget, currentMonthExpenses, goal);
+        setGoalStrategy(strat);
+      }
     } finally {
       setIsLoading(false);
     }
-  }, [budget, currentMonthExpenses, goal, rolloverAmount]);
+  }, [budget, currentMonthExpenses, goal, quest]);
 
   useEffect(() => {
-    const checkMonth = () => {
-      const currentDbBudget = db.getBudget();
-      if (currentDbBudget.month !== budget.month) {
-        setBudget(currentDbBudget);
-        setInsight(null);
-        setForecast(null);
-      }
-    };
-    checkMonth();
-    window.addEventListener('focus', checkMonth);
-    return () => window.removeEventListener('focus', checkMonth);
-  }, [budget.month]);
-
-  useEffect(() => {
-    if (currentMonthExpenses.length > 0 && !insight) {
-      refreshAI();
-    }
+    if (currentMonthExpenses.length > 0 && !insight) refreshAI();
   }, [currentMonthExpenses.length, refreshAI, insight]);
 
-  const handleBudgetUpdate = (newAmount: number) => {
-    const newBudget = { ...budget, amount: newAmount };
-    db.saveBudget(newBudget);
-    setBudget(newBudget);
-    setInsight(null);
-  };
-
-  const handleIncomeUpdate = (newIncome: number) => {
-    const newBudget = { ...budget, income: newIncome };
-    db.saveBudget(newBudget);
-    setBudget(newBudget);
-    setInsight(null);
-  };
-
-  const handleRolloverToggle = (enabled: boolean) => {
-    const newBudget = { ...budget, rolloverEnabled: enabled };
-    db.saveBudget(newBudget);
-    setBudget(newBudget);
-    setInsight(null);
-  };
-
-  const handleGoalUpdate = (newGoal: SavingsGoal) => {
-    db.saveGoal(newGoal);
-    setGoal(newGoal);
-    setGoalStrategy(null);
-    refreshAI();
+  const handleQuestAccept = () => {
+    if (quest) {
+      const activeQuest = { ...quest, status: 'Active' as const };
+      setQuest(activeQuest);
+      db.saveActiveQuest(activeQuest);
+    }
   };
 
   const handleAddExpense = (exp: Omit<Expense, 'id'>) => {
     const newExp = db.addExpense(exp);
     setExpenses([...expenses, newExp]);
     setInsight(null);
-    setForecast(null);
-    setGoalStrategy(null);
-    setSubAudit(null);
   };
 
   const handleDeleteExpense = (id: string) => {
     db.deleteExpense(id);
     setExpenses(expenses.filter(e => e.id !== id));
     setInsight(null);
-    setForecast(null);
-    setGoalStrategy(null);
-    setSubAudit(null);
   };
 
-  const monthName = useMemo(() => {
-    const [year, month] = budget.month.split('-');
-    return new Date(parseInt(year), parseInt(month) - 1).toLocaleString('default', { month: 'long', year: 'numeric' });
-  }, [budget.month]);
-
   return (
-    <div className="space-y-8 animate-in fade-in duration-500 pb-12">
+    <div className="space-y-8 animate-in fade-in duration-500 pb-24">
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
-          <h2 className="text-2xl font-bold text-slate-900">Financial Command Center</h2>
-          <p className="text-slate-500 text-sm">Active Period: <span className="font-semibold text-indigo-600">{monthName}</span></p>
+          <h2 className="text-3xl font-black text-slate-900 tracking-tight">Psychological Command</h2>
+          <p className="text-slate-500 text-sm font-medium">Month: <span className="font-bold text-indigo-600 uppercase">{budget.month}</span></p>
         </div>
-        <div className="flex items-center gap-4">
-          {wealthScore && (
-            <div className="bg-white border border-slate-200 rounded-2xl px-4 py-2 flex items-center gap-3 shadow-sm transition-transform hover:scale-105">
-              <div className="text-right">
-                <p className="text-[10px] font-black text-slate-400 uppercase leading-none">Wealth Score</p>
-                <p className="text-sm font-bold" style={{ color: wealthScore.color }}>{wealthScore.label}</p>
-              </div>
-              <div 
-                className="w-10 h-10 rounded-full flex items-center justify-center font-black text-white text-xs border-2" 
-                style={{ backgroundColor: wealthScore.color, borderColor: wealthScore.color + '44' }}
-              >
-                {wealthScore.score}
-              </div>
+        {wealthScore && (
+          <div className="bg-white border border-slate-200 rounded-3xl px-6 py-3 flex items-center gap-5 shadow-xl">
+            <div className="text-right">
+              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Health Score</p>
+              <p className="text-sm font-black" style={{ color: wealthScore.color }}>{wealthScore.label}</p>
             </div>
-          )}
-        </div>
+            <div className="w-12 h-12 rounded-full flex items-center justify-center font-black text-white text-base border-4" style={{ backgroundColor: wealthScore.color, borderColor: wealthScore.color + '15' }}>
+              {wealthScore.score}
+            </div>
+          </div>
+        )}
       </div>
 
-      {goal && (
-        <GoalProgress 
-          goal={goal} 
-          currentSavings={currentNetSavings + (budget.rolloverEnabled ? rolloverAmount : 0)} 
-          strategy={goalStrategy}
-          isLoading={isLoading}
-        />
-      )}
-
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm hover:border-indigo-100 transition-colors">
-          <p className="text-sm font-medium text-slate-500">Gross Income</p>
-          <p className="text-2xl font-bold text-slate-900">${budget.income.toLocaleString()}</p>
-        </div>
-        <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm relative overflow-hidden">
-          <p className="text-sm font-medium text-slate-500">Total Credit</p>
-          <p className="text-2xl font-bold text-slate-900">${totalAvailableBudget.toLocaleString()}</p>
-          {budget.rolloverEnabled && rolloverAmount > 0 && (
-            <div className="mt-1 flex items-center gap-1">
-              <span className="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>
-              <span className="text-[10px] font-bold text-indigo-600 uppercase">Includes Rollover</span>
-            </div>
-          )}
-        </div>
-        <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
-          <p className="text-sm font-medium text-slate-500">Spent to Date</p>
-          <p className="text-2xl font-bold text-indigo-600">${totalSpent.toLocaleString()}</p>
-        </div>
-        <div className={`p-6 rounded-2xl border shadow-sm transition-all ${currentNetSavings < 0 ? 'bg-red-50 border-red-100' : 'bg-emerald-50 border-emerald-100'}`}>
-          <p className="text-sm font-medium text-slate-500">Projected Surplus</p>
-          <p className={`text-2xl font-bold ${currentNetSavings < 0 ? 'text-red-600' : 'text-emerald-600'}`}>
-            ${currentNetSavings.toLocaleString()}
-          </p>
-        </div>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        {persona && <SpendingPersonaCard persona={persona} isLoading={isLoading} />}
+        {quest && <SavingsQuests quest={quest} isLoading={isLoading} onRefresh={refreshAI} onAccept={handleQuestAccept} />}
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2 space-y-6">
-          <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm">
-            <div className="flex justify-between items-center mb-8">
-              <h3 className="text-lg font-bold text-slate-800">Historical Trends</h3>
-              <div className="flex gap-4">
-                <div className="flex items-center gap-2">
-                  <div className="w-2 h-2 rounded-full bg-indigo-500"></div>
-                  <span className="text-[10px] font-bold text-slate-400 uppercase">Spent</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <div className="w-2 h-2 rounded-full bg-slate-200"></div>
-                  <span className="text-[10px] font-bold text-slate-400 uppercase">Budget</span>
-                </div>
-              </div>
-            </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
+        <div className="bg-white p-7 rounded-[2rem] border border-slate-200 shadow-sm"><p className="text-xs font-black text-slate-400 uppercase mb-2">Income</p><p className="text-3xl font-black text-slate-900">${budget.income.toLocaleString()}</p></div>
+        <div className="bg-white p-7 rounded-[2rem] border border-slate-200 shadow-sm"><p className="text-xs font-black text-slate-400 uppercase mb-2">Capacity</p><p className="text-3xl font-black text-slate-900">${totalAvailableBudget.toLocaleString()}</p></div>
+        <div className="bg-white p-7 rounded-[2rem] border border-slate-200 shadow-sm"><p className="text-xs font-black text-slate-400 uppercase mb-2">Outflow</p><p className="text-3xl font-black text-indigo-600">${totalSpent.toLocaleString()}</p></div>
+        <div className={`p-7 rounded-[2rem] border shadow-sm ${currentNetSavings < 0 ? 'bg-red-50 border-red-100' : 'bg-emerald-50 border-emerald-100'}`}><p className="text-xs font-black text-slate-400 uppercase mb-2">Surplus</p><p className={`text-3xl font-black ${currentNetSavings < 0 ? 'text-red-600' : 'text-emerald-600'}`}>${currentNetSavings.toLocaleString()}</p></div>
+      </div>
+
+      {freedomProjection && <FreedomHorizon projection={freedomProjection} isLoading={isLoading} />}
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+        <div className="lg:col-span-2 space-y-8">
+          <div className="bg-slate-950 rounded-[2.5rem] p-10 text-white shadow-2xl relative overflow-hidden group">
+            <h3 className="text-xl font-black tracking-tighter mb-8">Happiness ROI Audit</h3>
             <div className="h-64">
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={historicalData}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                  <XAxis dataKey="name" axisLine={false} tickLine={false} fontSize={10} tick={{ fill: '#94a3b8' }} />
-                  <YAxis hide />
-                  <Tooltip 
-                    contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }} 
-                    itemStyle={{ fontSize: '12px', fontWeight: 'bold' }}
-                  />
-                  <Line type="monotone" dataKey="spent" stroke="#6366f1" strokeWidth={4} dot={{ r: 4, fill: '#6366f1', strokeWidth: 2, stroke: '#fff' }} activeDot={{ r: 6 }} />
-                  <Line type="monotone" dataKey="budget" stroke="#e2e8f0" strokeWidth={2} strokeDasharray="5 5" dot={false} />
-                </LineChart>
+                <ScatterChart><XAxis type="number" dataKey="x" hide /><YAxis type="number" dataKey="y" hide domain={[0, 5]} /><ZAxis range={[50, 400]} /><Tooltip content={({ active, payload }) => { if (active && payload && payload.length) { const data = payload[0].payload; return (<div className="bg-white p-4 rounded-2xl shadow-xl text-slate-900"><p className="text-xs font-black uppercase text-slate-400 mb-1">{data.sentiment}</p><p className="text-sm font-bold">{data.name}</p><p className="text-lg font-black text-indigo-600 mt-1">${data.x}</p></div>); } return null; }} /><Scatter name="Expenses" data={scatterData}>{scatterData.map((entry, index) => (<Cell key={`cell-${index}`} fill={entry.sentiment === 'Regret' ? '#ef4444' : entry.sentiment === 'Joyful' ? '#10b981' : entry.sentiment === 'Essential' ? '#6366f1' : '#94a3b8'} />))}</Scatter></ScatterChart>
               </ResponsiveContainer>
             </div>
           </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex flex-col items-center">
-               <p className="text-xs font-bold text-slate-400 uppercase mb-4">Category Allocation</p>
-               <div className="h-48 w-full">
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie data={categoryData} innerRadius={50} outerRadius={70} paddingAngle={8} dataKey="value">
-                      {categoryData.map((_, index) => <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />)}
-                    </Pie>
-                    <Tooltip />
-                  </PieChart>
-                </ResponsiveContainer>
-               </div>
-            </div>
-            {forecast && (
-              <div className="bg-slate-900 rounded-3xl p-6 text-white shadow-xl flex flex-col justify-center relative overflow-hidden group">
-                <div className="absolute -right-4 -bottom-4 w-24 h-24 bg-indigo-500/20 rounded-full blur-2xl group-hover:scale-150 transition-transform duration-700"></div>
-                <div className="relative z-10">
-                  <h4 className="text-xs font-black text-indigo-400 uppercase tracking-widest mb-2">Month-End Forecast</h4>
-                  <p className="text-sm font-medium leading-relaxed italic text-indigo-50">{forecast}</p>
-                </div>
-              </div>
-            )}
-          </div>
-
-          <SubscriptionManager expenses={currentMonthExpenses} onDelete={handleDeleteExpense} auditInsight={subAudit} isLoading={isLoading} />
-
-          <div className="bg-indigo-600 rounded-3xl p-8 text-white shadow-xl relative overflow-hidden">
-            <div className="absolute top-0 left-0 w-32 h-32 bg-white/10 rounded-full -ml-16 -mt-16 blur-2xl"></div>
-            <div className="relative z-10">
-              <div className="flex items-center justify-between mb-6">
-                <div className="flex items-center gap-3">
-                  <div className="bg-white/20 p-2 rounded-xl backdrop-blur-md">✨</div>
-                  <h3 className="text-xl font-black tracking-tight">AI Monthly Insight</h3>
-                </div>
-                <button onClick={refreshAI} disabled={isLoading} className="px-4 py-1.5 bg-white/10 hover:bg-white/20 rounded-full text-xs font-bold transition-all border border-white/10">
-                  {isLoading ? 'Thinking...' : 'Refresh'}
-                </button>
-              </div>
-              <p className="text-lg font-medium leading-relaxed italic text-indigo-100">
-                {insight ? `"${insight}"` : "Input data for a personalized financial audit."}
-              </p>
-            </div>
-          </div>
+          <CategoryBudgetManager budget={budget} expenses={currentMonthExpenses} onUpdateLimits={(l) => { const nb = { ...budget, categoryLimits: l }; db.saveBudget(nb); setBudget(nb); refreshAI(); }} />
+          <div className="bg-indigo-600 rounded-[3rem] p-12 text-white shadow-3xl relative overflow-hidden"><h3 className="text-3xl font-black tracking-tighter mb-6">Behavioral Audit</h3><p className="text-2xl font-bold leading-tight italic text-indigo-50">{valueAudit || "Add sentiments to unlock."}</p></div>
         </div>
-
-        <div className="space-y-6">
-          <RolloverSettings enabled={budget.rolloverEnabled} onToggle={handleRolloverToggle} rolloverAmount={rolloverAmount} />
-          <SavingsGoalForm currentGoal={goal} onUpdate={handleGoalUpdate} />
-          <IncomeForm currentIncome={budget.income} onUpdate={handleIncomeUpdate} />
-          <BudgetForm currentBudget={budget.amount} onUpdate={handleBudgetUpdate} />
+        <div className="space-y-8">
+          <SavingsGoalForm currentGoal={goal} onUpdate={(g) => { db.saveGoal(g); setGoal(g); refreshAI(); }} />
+          <IncomeForm currentIncome={budget.income} onUpdate={(i) => { const nb = { ...budget, income: i }; db.saveBudget(nb); setBudget(nb); refreshAI(); }} />
+          <BudgetForm currentBudget={budget.amount} onUpdate={(a) => { const nb = { ...budget, amount: a }; db.saveBudget(nb); setBudget(nb); refreshAI(); }} />
           <ExpenseForm onAdd={handleAddExpense} />
-          
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-            <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50/30">
-              <h3 className="font-bold text-slate-800 text-sm uppercase tracking-wider">Activity Log</h3>
-              <span className="text-[10px] font-black text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full">{currentMonthExpenses.length}</span>
-            </div>
-            <div className="divide-y divide-slate-50 max-h-[300px] overflow-y-auto scrollbar-hide">
-              {currentMonthExpenses.length === 0 ? (
-                <div className="p-12 text-center opacity-40">
-                  <p className="text-slate-400 text-xs italic">No entries recorded.</p>
-                </div>
-              ) : (
-                currentMonthExpenses.slice().reverse().map(exp => (
-                  <div key={exp.id} className="px-6 py-4 flex justify-between items-center hover:bg-slate-50 transition-colors group">
-                    <div className="flex items-center gap-3">
-                      <div className={`w-1 h-6 rounded-full ${exp.isRecurring ? 'bg-indigo-500' : 'bg-slate-200'}`} />
-                      <div>
-                        <p className="font-bold text-slate-800 text-sm leading-tight">{exp.description}</p>
-                        <p className="text-[9px] text-slate-400 font-black uppercase mt-0.5">{exp.category}</p>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-4">
-                      <span className="font-black text-slate-700 text-sm tracking-tight">${exp.amount.toLocaleString()}</span>
-                      <button onClick={() => handleDeleteExpense(exp.id)} className="text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all p-1">
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M6 18L18 6M6 6l12 12" /></svg>
-                      </button>
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
         </div>
       </div>
       <ChatAssistant budget={budget} expenses={expenses} />
