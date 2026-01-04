@@ -1,0 +1,5 @@
+{
+  "name": "FreedomTrack",
+  "description": "A minimal, high-performance monthly budget and expense tracker that provides AI-driven financial insights using Gemini.",
+  "requestFramePermissions": []
+}
